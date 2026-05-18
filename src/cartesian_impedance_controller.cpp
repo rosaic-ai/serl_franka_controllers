@@ -25,7 +25,7 @@ bool CartesianImpedanceController::init(hardware_interface::RobotHW* robot_hw,
   publisher_franka_jacobian_.init(node_handle, "franka_jacobian", 1);
 
   sub_equilibrium_pose_ = node_handle.subscribe(
-      "equilibrium_pose", 20, &CartesianImpedanceController::equilibriumPoseCallback, this,
+      "/cartesian_impedance_controller/equilibrium_pose", 20, &CartesianImpedanceController::equilibriumPoseCallback, this,
       ros::TransportHints().reliable().tcpNoDelay());
 
   std::string arm_id;
@@ -90,7 +90,7 @@ bool CartesianImpedanceController::init(hardware_interface::RobotHW* robot_hw,
   }
 
   dynamic_reconfigure_compliance_param_node_ =
-      ros::NodeHandle(node_handle.getNamespace() + "dynamic_reconfigure_compliance_param_node");
+      ros::NodeHandle(node_handle.getNamespace() + "/dynamic_reconfigure_compliance_param_node");
 
   dynamic_server_compliance_param_ = std::make_unique<
       dynamic_reconfigure::Server<serl_franka_controllers::compliance_paramConfig>>(
@@ -116,7 +116,7 @@ void CartesianImpedanceController::starting(const ros::Time& /*time*/) {
   franka::RobotState initial_state = state_handle_->getRobotState();
   // get jacobian
   std::array<double, 42> jacobian_array =
-      model_handle_->getZeroJacobian(franka::Frame::kEndEffector);
+      model_handle_->getZeroJacobian(franka::Frame::kFlange);
   // convert to eigen
   Eigen::Map<Eigen::Matrix<double, 7, 1>> q_initial(initial_state.q.data());
   Eigen::Affine3d initial_transform(Eigen::Matrix4d::Map(initial_state.O_T_EE.data()));
@@ -136,11 +136,12 @@ void CartesianImpedanceController::update(const ros::Time& time,
   // get state variables
   franka::RobotState robot_state = state_handle_->getRobotState();
   std::array<double, 7> coriolis_array = model_handle_->getCoriolis();
-  jacobian_array =
-      model_handle_->getZeroJacobian(franka::Frame::kEndEffector);
+  std::array<double, 42> local_jacobian_array =
+      model_handle_->getZeroJacobian(franka::Frame::kFlange);
+  for(size_t i=0; i<42; ++i) jacobian_array[i] = local_jacobian_array[i];
   publishZeroJacobian(time);
   Eigen::Map<Eigen::Matrix<double, 7, 1>> coriolis(coriolis_array.data());
-  Eigen::Map<Eigen::Matrix<double, 6, 7>> jacobian(jacobian_array.data());
+  Eigen::Map<Eigen::Matrix<double, 6, 7>> jacobian(local_jacobian_array.data());
   Eigen::Map<Eigen::Matrix<double, 7, 1>> q(robot_state.q.data());
   Eigen::Map<Eigen::Matrix<double, 7, 1>> dq(robot_state.dq.data());
   Eigen::Map<Eigen::Matrix<double, 7, 1>> tau_J_d(  // NOLINT (readability-identifier-naming)
@@ -151,7 +152,7 @@ void CartesianImpedanceController::update(const ros::Time& time,
 
   // compute error to desired pose
   // Clip translational error
-  error_.head(3) << position - position_d_;
+  error_.head(3) = position - position_d_;
   for (int i = 0; i < 3; i++) {
     error_(i) = std::min(std::max(error_(i), translational_clip_min_(i)), translational_clip_max_(i));
   }
@@ -162,16 +163,18 @@ void CartesianImpedanceController::update(const ros::Time& time,
   }
   // "difference" quaternion
   Eigen::Quaterniond error_quaternion(orientation.inverse() * orientation_d_);
-  error_.tail(3) << error_quaternion.x(), error_quaternion.y(), error_quaternion.z();
+  error_(3) = error_quaternion.x();
+  error_(4) = error_quaternion.y();
+  error_(5) = error_quaternion.z();
   // Transform to base frame
   // Clip rotation error
-  error_.tail(3) << -transform.linear() * error_.tail(3);
+  error_.tail(3) = -transform.linear() * error_.tail(3);
     for (int i = 0; i < 3; i++) {
     error_(i+3) = std::min(std::max(error_(i+3), rotational_clip_min_(i)), rotational_clip_max_(i));
   }
 
-  error_i.head(3) << (error_i.head(3) + error_.head(3)).cwiseMax(-0.1).cwiseMin(0.1);
-  error_i.tail(3) << (error_i.tail(3) + error_.tail(3)).cwiseMax(-0.3).cwiseMin(0.3);
+  error_i.head(3) = (error_i.head(3) + error_.head(3)).cwiseMax(-0.1).cwiseMin(0.1);
+  error_i.tail(3) = (error_i.tail(3) + error_.tail(3)).cwiseMax(-0.3).cwiseMin(0.3);
 
   // compute control
   // allocate variables
@@ -182,24 +185,36 @@ void CartesianImpedanceController::update(const ros::Time& time,
   Eigen::MatrixXd jacobian_transpose_pinv;
   pseudoInverse(jacobian.transpose(), jacobian_transpose_pinv);
 
-  tau_task << jacobian.transpose() *
-                  (-cartesian_stiffness_ * error_ - cartesian_damping_ * (jacobian * dq) - Ki_ * error_i);
+  Eigen::Matrix<double, 6, 1> F_spring = -cartesian_stiffness_ * error_;
+  Eigen::Matrix<double, 6, 1> F_damp = -cartesian_damping_ * (jacobian * dq);
+  Eigen::Matrix<double, 6, 1> F_total = F_spring + F_damp - Ki_ * error_i;
+
+  tau_task = jacobian.transpose() * F_total;
 
   Eigen::Matrix<double, 7, 1> dqe;
   Eigen::Matrix<double, 7, 1> qe;
 
-  qe << q_d_nullspace_ - q;
-  qe.head(1) << qe.head(1) * joint1_nullspace_stiffness_;
-  dqe << dq;
-  dqe.head(1) << dqe.head(1) * 2.0 * sqrt(joint1_nullspace_stiffness_);
-  tau_nullspace << (Eigen::MatrixXd::Identity(7, 7) -
+  qe = q_d_nullspace_ - q;
+  qe(0) = qe(0) * joint1_nullspace_stiffness_;
+  dqe = dq;
+  dqe(0) = dqe(0) * 2.0 * sqrt(joint1_nullspace_stiffness_);
+  tau_nullspace = (Eigen::MatrixXd::Identity(7, 7) -
                     jacobian.transpose() * jacobian_transpose_pinv) *
                        (nullspace_stiffness_ * qe -
                         (2.0 * sqrt(nullspace_stiffness_)) * dqe);
   // Desired torque
-  tau_d << tau_task + tau_nullspace + coriolis;
+  tau_d = tau_task + tau_nullspace + coriolis;
   // Saturate torque rate to avoid discontinuities
-  tau_d << saturateTorqueRate(tau_d, tau_J_d);
+  tau_d = saturateTorqueRate(tau_d, tau_J_d);
+
+  // [DISABLED] 2초마다 F_tot/tau 디버그 로그 (터미널 출력 과부하 방지를 위해 주석 처리)
+  // static int tick = 0;
+  // if (++tick % 2000 == 0) {
+  //     ROS_INFO_STREAM("F_tot: " << F_total.transpose() 
+  //         << " | tau: " << tau_task.transpose()
+  //         << " | J21_array: " << local_jacobian_array[8]
+  //         << " | J00_array: " << local_jacobian_array[0]);
+  // }
 
   for (size_t i = 0; i < 7; ++i) {
     joint_handles_[i].setCommand(tau_d(i));
@@ -274,8 +289,10 @@ void CartesianImpedanceController::complianceParamCallback(
 
 void CartesianImpedanceController::equilibriumPoseCallback(
     const geometry_msgs::PoseStampedConstPtr& msg) {
+  // [DISABLED] equilibrium 수신 로그 (200Hz 명령 시 터미널 과부하 방지를 위해 주석 처리)
+  // ROS_INFO_STREAM("equilibriumPoseCallback RECEIVED message! Target Z=" << msg->pose.position.z);
   position_d_target_ << msg->pose.position.x, msg->pose.position.y, msg->pose.position.z;
-  error_i.setZero();
+  error_i.setZero();  // 새 목표 수신 시 적분 오차 초기화 (Ki=0 운용 시 안전, 복원됨)
   Eigen::Quaterniond last_orientation_d_target(orientation_d_target_);
   orientation_d_target_.coeffs() << msg->pose.orientation.x, msg->pose.orientation.y,
       msg->pose.orientation.z, msg->pose.orientation.w;
