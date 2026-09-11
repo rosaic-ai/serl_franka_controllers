@@ -116,7 +116,7 @@ void CartesianImpedanceController::starting(const ros::Time& /*time*/) {
   franka::RobotState initial_state = state_handle_->getRobotState();
   // get jacobian
   std::array<double, 42> jacobian_array =
-      model_handle_->getZeroJacobian(franka::Frame::kFlange);
+      model_handle_->getZeroJacobian(franka::Frame::kEndEffector);
   // convert to eigen
   Eigen::Map<Eigen::Matrix<double, 7, 1>> q_initial(initial_state.q.data());
   Eigen::Affine3d initial_transform(Eigen::Matrix4d::Map(initial_state.O_T_EE.data()));
@@ -137,7 +137,7 @@ void CartesianImpedanceController::update(const ros::Time& time,
   franka::RobotState robot_state = state_handle_->getRobotState();
   std::array<double, 7> coriolis_array = model_handle_->getCoriolis();
   std::array<double, 42> local_jacobian_array =
-      model_handle_->getZeroJacobian(franka::Frame::kFlange);
+      model_handle_->getZeroJacobian(franka::Frame::kEndEffector);
   for(size_t i=0; i<42; ++i) jacobian_array[i] = local_jacobian_array[i];
   publishZeroJacobian(time);
   Eigen::Map<Eigen::Matrix<double, 7, 1>> coriolis(coriolis_array.data());
