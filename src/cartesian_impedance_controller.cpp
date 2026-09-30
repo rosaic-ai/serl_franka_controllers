@@ -230,8 +230,8 @@ void CartesianImpedanceController::update(const ros::Time& time,
       filter_params_ * nullspace_stiffness_target_ + (1.0 - filter_params_) * nullspace_stiffness_;
   joint1_nullspace_stiffness_ =
       filter_params_ * joint1_nullspace_stiffness_target_ + (1.0 - filter_params_) * joint1_nullspace_stiffness_;
-  position_d_ = filter_params_ * position_d_target_ + (1.0 - filter_params_) * position_d_;
-  orientation_d_ = orientation_d_.slerp(filter_params_, orientation_d_target_);
+  position_d_ = target_filter_ * position_d_target_ + (1.0 - target_filter_) * position_d_;
+  orientation_d_ = orientation_d_.slerp(target_filter_, orientation_d_target_);
   Ki_ = filter_params_ * Ki_target_ + (1.0 - filter_params_) * Ki_;
 }
 
@@ -285,6 +285,8 @@ void CartesianImpedanceController::complianceParamCallback(
       << config.translational_Ki * Eigen::Matrix3d::Identity();
   Ki_target_.bottomRightCorner(3, 3)
       << config.rotational_Ki * Eigen::Matrix3d::Identity();
+
+  target_filter_ = config.target_filter;
 }
 
 void CartesianImpedanceController::equilibriumPoseCallback(

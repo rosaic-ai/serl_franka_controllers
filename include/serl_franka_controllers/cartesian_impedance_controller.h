@@ -45,6 +45,7 @@ class CartesianImpedanceController : public controller_interface::MultiInterface
   std::array<double, 42> jacobian_array;
 
   double filter_params_{0.005};
+  double target_filter_{0.005};  // desired pose low-pass only; filter_params_ keeps the gains
   double nullspace_stiffness_{20.0};
   double nullspace_stiffness_target_{20.0};
   double joint1_nullspace_stiffness_{20.0};
