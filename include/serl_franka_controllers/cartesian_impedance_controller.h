@@ -67,6 +67,9 @@ class CartesianImpedanceController : public controller_interface::MultiInterface
   Eigen::Vector3d position_d_;
   Eigen::Matrix<double, 6, 1> error_;
   Eigen::Matrix<double, 6, 1> error_i;
+  // 이보다 크게 튀는 새 목표에서만 적분 오차를 비운다(위치 m, 회전 rad)
+  static constexpr double kIntegralResetJumpM = 0.02;
+  static constexpr double kIntegralResetJumpRad = 0.1;
   Eigen::Quaterniond orientation_d_;
   Eigen::Vector3d position_d_target_;
   Eigen::Quaterniond orientation_d_target_;

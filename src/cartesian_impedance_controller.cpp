@@ -129,6 +129,8 @@ void CartesianImpedanceController::starting(const ros::Time& /*time*/) {
 
   // set nullspace equilibrium configuration to initial q
   q_d_nullspace_ = q_initial;
+  // 적분 오차는 제어기 시작 때 비운다(목표 스트림 중에는 유지해 관절 마찰로 남는 정상 상태 오차를 메운다)
+  error_i.setZero();
 }
 
 void CartesianImpedanceController::update(const ros::Time& time,
@@ -293,13 +295,18 @@ void CartesianImpedanceController::equilibriumPoseCallback(
     const geometry_msgs::PoseStampedConstPtr& msg) {
   // [DISABLED] equilibrium 수신 로그 (200Hz 명령 시 터미널 과부하 방지를 위해 주석 처리)
   // ROS_INFO_STREAM("equilibriumPoseCallback RECEIVED message! Target Z=" << msg->pose.position.z);
+  Eigen::Vector3d last_position_d_target(position_d_target_);
   position_d_target_ << msg->pose.position.x, msg->pose.position.y, msg->pose.position.z;
-  error_i.setZero();  // 새 목표 수신 시 적분 오차 초기화 (Ki=0 운용 시 안전, 복원됨)
   Eigen::Quaterniond last_orientation_d_target(orientation_d_target_);
   orientation_d_target_.coeffs() << msg->pose.orientation.x, msg->pose.orientation.y,
       msg->pose.orientation.z, msg->pose.orientation.w;
   if (last_orientation_d_target.coeffs().dot(orientation_d_target_.coeffs()) < 0.0) {
     orientation_d_target_.coeffs() << -orientation_d_target_.coeffs();
+  }
+  // 적분 오차는 목표가 크게 튈 때만 비운다(10-09). 200 Hz 목표 스트림마다 비우면 적분이 쌓이지 않는다
+  if ((position_d_target_ - last_position_d_target).norm() > kIntegralResetJumpM ||
+      last_orientation_d_target.angularDistance(orientation_d_target_) > kIntegralResetJumpRad) {
+    error_i.setZero();
   }
 }
 
