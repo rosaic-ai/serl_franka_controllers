@@ -103,6 +103,10 @@ bool CartesianImpedanceController::init(hardware_interface::RobotHW* robot_hw,
   orientation_d_.coeffs() << 0.0, 0.0, 0.0, 1.0;
   position_d_target_.setZero();
   orientation_d_target_.coeffs() << 0.0, 0.0, 0.0, 1.0;
+  position_d_prev_.setZero();
+  orientation_d_prev_.coeffs() << 0.0, 0.0, 0.0, 1.0;
+  friction_.setZero();
+  friction_target_.setZero();
 
   cartesian_stiffness_.setZero();
   cartesian_damping_.setZero();
@@ -126,13 +130,15 @@ void CartesianImpedanceController::starting(const ros::Time& /*time*/) {
   orientation_d_ = Eigen::Quaterniond(initial_transform.linear());
   position_d_target_ = initial_transform.translation();
   orientation_d_target_ = Eigen::Quaterniond(initial_transform.linear());
+  position_d_prev_ = position_d_;
+  orientation_d_prev_ = orientation_d_;
 
   // set nullspace equilibrium configuration to initial q
   q_d_nullspace_ = q_initial;
 }
 
 void CartesianImpedanceController::update(const ros::Time& time,
-                                                 const ros::Duration& /*period*/) {
+                                                 const ros::Duration& period) {
   // get state variables
   franka::RobotState robot_state = state_handle_->getRobotState();
   std::array<double, 7> coriolis_array = model_handle_->getCoriolis();
@@ -202,8 +208,29 @@ void CartesianImpedanceController::update(const ros::Time& time,
                     jacobian.transpose() * jacobian_transpose_pinv) *
                        (nullspace_stiffness_ * qe -
                         (2.0 * sqrt(nullspace_stiffness_)) * dqe);
+  // Joint friction feedforward. The direction comes from the desired joint velocity (the filtered
+  // target's motion over the last cycle), not the measured one: a joint held by static friction has
+  // zero measured velocity, and a stationary target leaves the term at zero so nothing chatters at rest.
+  double dt = period.toSec() > 0.0 ? period.toSec() : 0.001;
+  Eigen::Matrix<double, 6, 1> twist_d;
+  twist_d.head(3) = (position_d_ - position_d_prev_) / dt;
+  Eigen::Quaterniond rotation_step(orientation_d_ * orientation_d_prev_.inverse());
+  rotation_step.normalize();
+  if (rotation_step.w() < 0.0) {
+    rotation_step.coeffs() << -rotation_step.coeffs();
+  }
+  Eigen::AngleAxisd rotation_step_aa(rotation_step);
+  twist_d.tail(3) = rotation_step_aa.axis() * rotation_step_aa.angle() / dt;
+  Eigen::MatrixXd jacobian_pinv;
+  pseudoInverse(jacobian, jacobian_pinv);
+  Eigen::Matrix<double, 7, 1> dq_desired = jacobian_pinv * twist_d;
+  Eigen::Matrix<double, 7, 1> tau_friction;
+  for (int i = 0; i < 7; ++i) {
+    tau_friction(i) = friction_(i) * std::tanh(dq_desired(i) / friction_v0_);
+  }
+
   // Desired torque
-  tau_d = tau_task + tau_nullspace + coriolis;
+  tau_d = tau_task + tau_nullspace + coriolis + tau_friction;
   // Saturate torque rate to avoid discontinuities
   tau_d = saturateTorqueRate(tau_d, tau_J_d);
 
@@ -230,9 +257,12 @@ void CartesianImpedanceController::update(const ros::Time& time,
       filter_params_ * nullspace_stiffness_target_ + (1.0 - filter_params_) * nullspace_stiffness_;
   joint1_nullspace_stiffness_ =
       filter_params_ * joint1_nullspace_stiffness_target_ + (1.0 - filter_params_) * joint1_nullspace_stiffness_;
+  position_d_prev_ = position_d_;
+  orientation_d_prev_ = orientation_d_;
   position_d_ = target_filter_ * position_d_target_ + (1.0 - target_filter_) * position_d_;
   orientation_d_ = orientation_d_.slerp(target_filter_, orientation_d_target_);
   Ki_ = filter_params_ * Ki_target_ + (1.0 - filter_params_) * Ki_;
+  friction_ = filter_params_ * friction_target_ + (1.0 - filter_params_) * friction_;
 }
 
 void CartesianImpedanceController::publishZeroJacobian(const ros::Time& time) {
@@ -287,6 +317,10 @@ void CartesianImpedanceController::complianceParamCallback(
       << config.rotational_Ki * Eigen::Matrix3d::Identity();
 
   target_filter_ = config.target_filter;
+
+  friction_target_ << config.friction_j1, config.friction_j2, config.friction_j3, config.friction_j4,
+      config.friction_j5, config.friction_j6, config.friction_j7;
+  friction_v0_ = config.friction_v0;
 }
 
 void CartesianImpedanceController::equilibriumPoseCallback(

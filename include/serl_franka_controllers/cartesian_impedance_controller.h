@@ -70,6 +70,12 @@ class CartesianImpedanceController : public controller_interface::MultiInterface
   Eigen::Quaterniond orientation_d_;
   Eigen::Vector3d position_d_target_;
   Eigen::Quaterniond orientation_d_target_;
+  // Joint friction feedforward: Coulomb torque along the desired joint velocity (0 = off)
+  Eigen::Matrix<double, 7, 1> friction_;
+  Eigen::Matrix<double, 7, 1> friction_target_;
+  double friction_v0_{0.01};
+  Eigen::Vector3d position_d_prev_;
+  Eigen::Quaterniond orientation_d_prev_;
 
   // Dynamic reconfigure
   std::unique_ptr<dynamic_reconfigure::Server<serl_franka_controllers::compliance_paramConfig>>
