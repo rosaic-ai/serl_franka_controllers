@@ -27,6 +27,9 @@ bool CartesianImpedanceController::init(hardware_interface::RobotHW* robot_hw,
   sub_equilibrium_pose_ = node_handle.subscribe(
       "/cartesian_impedance_controller/equilibrium_pose", 20, &CartesianImpedanceController::equilibriumPoseCallback, this,
       ros::TransportHints().reliable().tcpNoDelay());
+  // Wrist force relayed from the ManipForce PC (rosaic_franka_ft_relay); only the hybrid friction rule reads it
+  sub_ft_relay_ = node_handle.subscribe("/rosaic/ft_relay", 1, &CartesianImpedanceController::ftRelayCallback,
+                                        this, ros::TransportHints().reliable().tcpNoDelay());
 
   std::string arm_id;
   if (!node_handle.getParam("arm_id", arm_id)) {
@@ -132,6 +135,7 @@ void CartesianImpedanceController::starting(const ros::Time& /*time*/) {
   orientation_d_target_ = Eigen::Quaterniond(initial_transform.linear());
   position_d_prev_ = position_d_;
   orientation_d_prev_ = orientation_d_;
+  friction_stuck_s_.fill(0.0);
 
   // set nullspace equilibrium configuration to initial q
   q_d_nullspace_ = q_initial;
@@ -208,9 +212,10 @@ void CartesianImpedanceController::update(const ros::Time& time,
                     jacobian.transpose() * jacobian_transpose_pinv) *
                        (nullspace_stiffness_ * qe -
                         (2.0 * sqrt(nullspace_stiffness_)) * dqe);
-  // Joint friction feedforward. The direction comes from the desired joint velocity (the filtered
-  // target's motion over the last cycle), not the measured one: a joint held by static friction has
+  // Joint friction feedforward (friction_rule.h). Mode 1 takes the direction from the desired joint
+  // velocity (the filtered target's motion over the last cycle): a joint held by static friction has
   // zero measured velocity, and a stationary target leaves the term at zero so nothing chatters at rest.
+  // Mode 2 (hybrid) also reads the relayed wrist force so a hand blocked by an object is not pushed further.
   double dt = period.toSec() > 0.0 ? period.toSec() : 0.001;
   Eigen::Matrix<double, 6, 1> twist_d;
   twist_d.head(3) = (position_d_ - position_d_prev_) / dt;
@@ -224,9 +229,15 @@ void CartesianImpedanceController::update(const ros::Time& time,
   Eigen::MatrixXd jacobian_pinv;
   pseudoInverse(jacobian, jacobian_pinv);
   Eigen::Matrix<double, 7, 1> dq_desired = jacobian_pinv * twist_d;
+  // Relayed F/T is "known" only while fresh; the hybrid rule turns friction off otherwise (fail-closed)
+  const FtRelaySample ft_relay = *ft_relay_buffer_.readFromRT();
+  const double ft_age = (time - ft_relay.stamp).toSec();
+  const bool ft_known = ft_relay.valid && ft_age >= -0.01 && ft_age <= friction_ft_timeout_s_;
+  friction_params_.v0_desired = friction_v0_;
   Eigen::Matrix<double, 7, 1> tau_friction;
   for (int i = 0; i < 7; ++i) {
-    tau_friction(i) = friction_(i) * std::tanh(dq_desired(i) / friction_v0_);
+    tau_friction(i) = friction::torque(friction_(i), dq(i), dq_desired(i), ft_known, ft_relay.magnitude, dt,
+                                       &friction_stuck_s_[i], friction_params_);
   }
 
   // Desired torque
@@ -321,6 +332,22 @@ void CartesianImpedanceController::complianceParamCallback(
   friction_target_ << config.friction_j1, config.friction_j2, config.friction_j3, config.friction_j4,
       config.friction_j5, config.friction_j6, config.friction_j7;
   friction_v0_ = config.friction_v0;
+  friction_params_.mode = config.friction_mode;
+  friction_params_.v_move = config.friction_v_move;
+  friction_params_.v0_actual = config.friction_v0_actual;
+  friction_params_.breakaway_s = config.friction_breakaway_s;
+  friction_params_.contact_n = config.friction_contact_n;
+  friction_ft_timeout_s_ = config.friction_ft_timeout_s;
+}
+
+void CartesianImpedanceController::ftRelayCallback(const geometry_msgs::WrenchStampedConstPtr& msg) {
+  FtRelaySample sample;
+  sample.stamp = msg->header.stamp;
+  sample.magnitude = std::sqrt(msg->wrench.force.x * msg->wrench.force.x +
+                               msg->wrench.force.y * msg->wrench.force.y +
+                               msg->wrench.force.z * msg->wrench.force.z);
+  sample.valid = true;
+  ft_relay_buffer_.writeFromNonRT(sample);
 }
 
 void CartesianImpedanceController::equilibriumPoseCallback(

@@ -19,7 +19,10 @@
 #include <serl_franka_controllers/compliance_paramConfig.h>
 #include <franka_hw/franka_model_interface.h>
 #include <franka_hw/franka_state_interface.h>
+#include <geometry_msgs/WrenchStamped.h>
+#include <realtime_tools/realtime_buffer.h>
 #include <realtime_tools/realtime_publisher.h>
+#include <serl_franka_controllers/friction_rule.h>
 #include <serl_franka_controllers/ZeroJacobian.h>
 
 namespace serl_franka_controllers {
@@ -74,6 +77,18 @@ class CartesianImpedanceController : public controller_interface::MultiInterface
   Eigen::Matrix<double, 7, 1> friction_;
   Eigen::Matrix<double, 7, 1> friction_target_;
   double friction_v0_{0.01};
+  // Hybrid rule settings (friction_rule.h) and the relayed wrist force it reads (2026-10-15)
+  friction::Params friction_params_;
+  double friction_ft_timeout_s_{0.05};
+  std::array<double, 7> friction_stuck_s_{};
+  struct FtRelaySample {
+    ros::Time stamp;
+    double magnitude{0.0};
+    bool valid{false};
+  };
+  realtime_tools::RealtimeBuffer<FtRelaySample> ft_relay_buffer_;
+  ros::Subscriber sub_ft_relay_;
+  void ftRelayCallback(const geometry_msgs::WrenchStampedConstPtr& msg);
   Eigen::Vector3d position_d_prev_;
   Eigen::Quaterniond orientation_d_prev_;
 

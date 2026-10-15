@@ -98,6 +98,15 @@ install(FILES serl_franka_controllers_plugin.xml
   DESTINATION ${CATKIN_PACKAGE_SHARE_DESTINATION}
 )
 
+## Tests
+# Friction feedforward rule (header-only, no ROS): catkin_make run_tests_serl_franka_controllers
+if(CATKIN_ENABLE_TESTING)
+  catkin_add_gtest(friction_rule_test test/friction_rule_test.cpp)
+  if(TARGET friction_rule_test)
+    target_include_directories(friction_rule_test PRIVATE include)
+  endif()
+endif()
+
 ## Tools
 include(${CMAKE_CURRENT_LIST_DIR}/../cmake/ClangTools.cmake OPTIONAL
   RESULT_VARIABLE CLANG_TOOLS
