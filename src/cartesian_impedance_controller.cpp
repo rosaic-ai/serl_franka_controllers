@@ -338,7 +338,6 @@ void CartesianImpedanceController::complianceParamCallback(
   friction_v0_ = config.friction_v0;
   friction_params_.mode = config.friction_mode;
   friction_params_.v_move = config.friction_v_move;
-  friction_params_.v0_actual = config.friction_v0_actual;
   friction_params_.breakaway_s = config.friction_breakaway_s;
   friction_params_.contact_n = config.friction_contact_n;
   friction_ft_timeout_s_ = config.friction_ft_timeout_s;

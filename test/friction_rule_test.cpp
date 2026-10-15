@@ -40,10 +40,10 @@ TEST(FrictionRule, HybridIsOffWhenFtIsUnknown) {
   EXPECT_EQ(stuck, 0.0);
 }
 
-TEST(FrictionRule, HybridFollowsMeasuredDirectionWhileMoving) {
+TEST(FrictionRule, HybridMovingJointGetsTheFullDesiredDirectionTorque) {
   double stuck = 0.1;
-  // moving opposite to the target (overshoot): measured direction wins, stuck timer resets
-  EXPECT_DOUBLE_EQ(fr::torque(1.0, -0.05, 0.08, true, 10.0, 0.001, &stuck, hybrid()), std::tanh(-0.05 / 0.01));
+  // a moving joint is not blocked: same torque as mode 1 even with wrist force, stuck timer resets
+  EXPECT_DOUBLE_EQ(fr::torque(1.0, -0.05, 0.08, true, 10.0, 0.001, &stuck, hybrid()), std::tanh(0.08 / 0.01));
   EXPECT_EQ(stuck, 0.0);
 }
 
@@ -75,9 +75,9 @@ TEST(FrictionRule, HybridPushFadesWithWristForce) {
   EXPECT_EQ(fr::torque(1.0, 0.0, 0.03, true, 3.0, 0.001, &stuck, hybrid()), 0.0);
 }
 
-TEST(FrictionRule, HybridIsQuietWhenJointAndTargetAreStill) {
+TEST(FrictionRule, HybridEqualsModeOneWhenJointAndTargetAreStill) {
   double stuck = 0.2;
-  EXPECT_EQ(fr::torque(1.0, 0.002, 0.001, true, 0.0, 0.001, &stuck, hybrid()), 0.0);
+  EXPECT_DOUBLE_EQ(fr::torque(1.0, 0.002, 0.001, true, 5.0, 0.001, &stuck, hybrid()), std::tanh(0.001 / 0.01));
   EXPECT_EQ(stuck, 0.0);
 }
 
