@@ -80,6 +80,8 @@ class CartesianImpedanceController : public controller_interface::MultiInterface
   // Hybrid rule settings (friction_rule.h) and the relayed wrist force it reads (2026-10-15)
   friction::Params friction_params_;
   double friction_ft_timeout_s_{0.05};
+  double friction_dq_filter_hz_{20.0};
+  Eigen::Matrix<double, 7, 1> dq_filtered_;  // low-pass measured joint velocity for the hybrid rule
   std::array<double, 7> friction_stuck_s_{};
   struct FtRelaySample {
     ros::Time stamp;

@@ -110,6 +110,7 @@ bool CartesianImpedanceController::init(hardware_interface::RobotHW* robot_hw,
   orientation_d_prev_.coeffs() << 0.0, 0.0, 0.0, 1.0;
   friction_.setZero();
   friction_target_.setZero();
+  dq_filtered_.setZero();
 
   cartesian_stiffness_.setZero();
   cartesian_damping_.setZero();
@@ -136,6 +137,7 @@ void CartesianImpedanceController::starting(const ros::Time& /*time*/) {
   position_d_prev_ = position_d_;
   orientation_d_prev_ = orientation_d_;
   friction_stuck_s_.fill(0.0);
+  dq_filtered_ = Eigen::Map<Eigen::Matrix<double, 7, 1>>(initial_state.dq.data());
 
   // set nullspace equilibrium configuration to initial q
   q_d_nullspace_ = q_initial;
@@ -215,7 +217,8 @@ void CartesianImpedanceController::update(const ros::Time& time,
   // Joint friction feedforward (friction_rule.h). Mode 1 takes the direction from the desired joint
   // velocity (the filtered target's motion over the last cycle): a joint held by static friction has
   // zero measured velocity, and a stationary target leaves the term at zero so nothing chatters at rest.
-  // Mode 2 (hybrid) also reads the relayed wrist force so a hand blocked by an object is not pushed further.
+  // Mode 2 (hybrid) also reads the relayed wrist force so a hand blocked by an object is not pushed further,
+  // and follows the low-pass filtered measured velocity while a joint moves.
   double dt = period.toSec() > 0.0 ? period.toSec() : 0.001;
   Eigen::Matrix<double, 6, 1> twist_d;
   twist_d.head(3) = (position_d_ - position_d_prev_) / dt;
@@ -236,8 +239,9 @@ void CartesianImpedanceController::update(const ros::Time& time,
   friction_params_.v0_desired = friction_v0_;
   Eigen::Matrix<double, 7, 1> tau_friction;
   for (int i = 0; i < 7; ++i) {
-    tau_friction(i) = friction::torque(friction_(i), dq(i), dq_desired(i), ft_known, ft_relay.magnitude, dt,
-                                       &friction_stuck_s_[i], friction_params_);
+    dq_filtered_(i) = friction::lowPass(dq_filtered_(i), dq(i), friction_dq_filter_hz_, dt);
+    tau_friction(i) = friction::torque(friction_(i), dq_filtered_(i), dq_desired(i), ft_known, ft_relay.magnitude,
+                                       dt, &friction_stuck_s_[i], friction_params_);
   }
 
   // Desired torque
@@ -338,6 +342,7 @@ void CartesianImpedanceController::complianceParamCallback(
   friction_params_.breakaway_s = config.friction_breakaway_s;
   friction_params_.contact_n = config.friction_contact_n;
   friction_ft_timeout_s_ = config.friction_ft_timeout_s;
+  friction_dq_filter_hz_ = config.friction_dq_filter_hz;
 }
 
 void CartesianImpedanceController::ftRelayCallback(const geometry_msgs::WrenchStampedConstPtr& msg) {
