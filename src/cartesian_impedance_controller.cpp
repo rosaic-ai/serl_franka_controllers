@@ -28,6 +28,28 @@ bool CartesianImpedanceController::init(hardware_interface::RobotHW* robot_hw,
       "/cartesian_impedance_controller/equilibrium_pose", 20, &CartesianImpedanceController::equilibriumPoseCallback, this,
       ros::TransportHints().reliable().tcpNoDelay());
 
+  TrackingCorrectionConfig correction_config;
+  correction_node_=ros::NodeHandle(node_handle, "tracking_correction");
+  correction_node_.param("gain", correction_config.gain, 600.0);
+  correction_node_.param("max_force", correction_config.max_force, 15.0);
+  correction_node_.param("slew", correction_config.slew, 3.0);
+  correction_node_.param("max_error", correction_config.max_error, 0.015);
+  correction_node_.param("external_force_trip", correction_config.external_force_trip, 12.0);
+  if (!std::isfinite(correction_config.gain) || correction_config.gain<=0 || correction_config.gain>1500 ||
+      !std::isfinite(correction_config.max_force) || correction_config.max_force<=0 || correction_config.max_force>15 ||
+      !std::isfinite(correction_config.slew) || correction_config.slew<=0 || correction_config.slew>3 ||
+      !std::isfinite(correction_config.max_error) || correction_config.max_error<=0 || correction_config.max_error>0.015 ||
+      !std::isfinite(correction_config.external_force_trip) || correction_config.external_force_trip<=0 || correction_config.external_force_trip>12) {
+    ROS_ERROR("Invalid tracking correction limits"); return false;
+  }
+  tracking_correction_=BoundedTrackingCorrection(correction_config);
+  correction_node_.param("enabled", correction_enabled_, false);
+  correction_control_buffer_.writeFromNonRT({correction_enabled_, 0});
+  desired_pose_buffer_.writeFromNonRT({Eigen::Vector3d::Zero(), Eigen::Quaterniond::Identity()});
+  correction_service_=correction_node_.advertiseService("set_enabled", &CartesianImpedanceController::setTrackingCorrection, this);
+  correction_publisher_.init(correction_node_, "state", 1);
+  correction_publisher_.msg_.data.resize(12,0.0);
+
   std::string arm_id;
   if (!node_handle.getParam("arm_id", arm_id)) {
     ROS_ERROR_STREAM("CartesianImpedanceController: Could not read parameter arm_id");
@@ -116,7 +138,7 @@ void CartesianImpedanceController::starting(const ros::Time& /*time*/) {
   franka::RobotState initial_state = state_handle_->getRobotState();
   // get jacobian
   std::array<double, 42> jacobian_array =
-      model_handle_->getZeroJacobian(franka::Frame::kFlange);
+      model_handle_->getZeroJacobian(franka::Frame::kEndEffector);
   // convert to eigen
   Eigen::Map<Eigen::Matrix<double, 7, 1>> q_initial(initial_state.q.data());
   Eigen::Affine3d initial_transform(Eigen::Matrix4d::Map(initial_state.O_T_EE.data()));
@@ -129,15 +151,19 @@ void CartesianImpedanceController::starting(const ros::Time& /*time*/) {
 
   // set nullspace equilibrium configuration to initial q
   q_d_nullspace_ = q_initial;
+  tracking_correction_.reset();
+  // Startup is not concurrent with update; initialize the RT target to current pose.
+  desired_pose_buffer_.initRT({position_d_, orientation_d_});
+  last_correction_publish_=ros::Time(0);
 }
 
 void CartesianImpedanceController::update(const ros::Time& time,
-                                                 const ros::Duration& /*period*/) {
+                                                 const ros::Duration& period) {
   // get state variables
   franka::RobotState robot_state = state_handle_->getRobotState();
   std::array<double, 7> coriolis_array = model_handle_->getCoriolis();
   std::array<double, 42> local_jacobian_array =
-      model_handle_->getZeroJacobian(franka::Frame::kFlange);
+      model_handle_->getZeroJacobian(franka::Frame::kEndEffector);
   for(size_t i=0; i<42; ++i) jacobian_array[i] = local_jacobian_array[i];
   publishZeroJacobian(time);
   Eigen::Map<Eigen::Matrix<double, 7, 1>> coriolis(coriolis_array.data());
@@ -149,6 +175,16 @@ void CartesianImpedanceController::update(const ros::Time& time,
   Eigen::Affine3d transform(Eigen::Matrix4d::Map(robot_state.O_T_EE.data()));
   Eigen::Vector3d position(transform.translation());
   Eigen::Quaterniond orientation(transform.linear());
+
+  const auto target=*desired_pose_buffer_.readFromRT();
+  position_d_target_=target.position;
+  orientation_d_target_=target.orientation;
+  const auto control=*correction_control_buffer_.readFromRT();
+  correction_enabled_=control.enabled;
+  if (control.generation!=applied_correction_generation_) {
+    applied_correction_generation_=control.generation;
+    tracking_correction_.clearTrip();
+  }
 
   // compute error to desired pose
   // Clip translational error
@@ -173,8 +209,18 @@ void CartesianImpedanceController::update(const ros::Time& time,
     error_(i+3) = std::min(std::max(error_(i+3), rotational_clip_min_(i)), rotational_clip_max_(i));
   }
 
-  error_i.head(3) = (error_i.head(3) + error_.head(3)).cwiseMax(-0.1).cwiseMin(0.1);
-  error_i.tail(3) = (error_i.tail(3) + error_.tail(3)).cwiseMax(-0.3).cwiseMin(0.3);
+  const double dt=period.toSec();
+  const double target_speed=(dt>0.) ? filter_params_*(position_d_target_-position_d_).norm()/dt : 1e6;
+  const double actual_speed=(jacobian*dq).head<3>().norm();
+  const Eigen::Vector3d external_force(robot_state.O_F_ext_hat_K[0], robot_state.O_F_ext_hat_K[1], robot_state.O_F_ext_hat_K[2]);
+  const auto extra_force=tracking_correction_.update(dt, position_d_-position,
+      target_speed, actual_speed, external_force.norm(), correction_enabled_);
+  if ((time-last_correction_publish_).toSec()>=0.05 && correction_publisher_.trylock()) {
+    auto& d=correction_publisher_.msg_.data;
+    for (int i=0;i<3;++i) { d[i]=extra_force[i]; d[3+i]=position_d_[i]-position[i]; d[6+i]=position_d_target_[i]; }
+    d[9]=external_force.norm(); d[10]=tracking_correction_.state(); d[11]=correction_enabled_ ? 1.0 : 0.0;
+    correction_publisher_.unlockAndPublish(); last_correction_publish_=time;
+  }
 
   // compute control
   // allocate variables
@@ -187,7 +233,8 @@ void CartesianImpedanceController::update(const ros::Time& time,
 
   Eigen::Matrix<double, 6, 1> F_spring = -cartesian_stiffness_ * error_;
   Eigen::Matrix<double, 6, 1> F_damp = -cartesian_damping_ * (jacobian * dq);
-  Eigen::Matrix<double, 6, 1> F_total = F_spring + F_damp - Ki_ * error_i;
+  Eigen::Matrix<double, 6, 1> F_total = F_spring + F_damp;
+  F_total.head<3>() += extra_force;
 
   tau_task = jacobian.transpose() * F_total;
 
@@ -232,7 +279,7 @@ void CartesianImpedanceController::update(const ros::Time& time,
       filter_params_ * joint1_nullspace_stiffness_target_ + (1.0 - filter_params_) * joint1_nullspace_stiffness_;
   position_d_ = filter_params_ * position_d_target_ + (1.0 - filter_params_) * position_d_;
   orientation_d_ = orientation_d_.slerp(filter_params_, orientation_d_target_);
-  Ki_ = filter_params_ * Ki_target_ + (1.0 - filter_params_) * Ki_;
+
 }
 
 void CartesianImpedanceController::publishZeroJacobian(const ros::Time& time) {
@@ -280,25 +327,32 @@ void CartesianImpedanceController::complianceParamCallback(
   rotational_clip_min_ << -config.rotational_clip_neg_x, -config.rotational_clip_neg_y, -config.rotational_clip_neg_z;
   rotational_clip_max_ << config.rotational_clip_x, config.rotational_clip_y, config.rotational_clip_z;
 
-  Ki_target_.setIdentity();
-  Ki_target_.topLeftCorner(3, 3)
-      << config.translational_Ki * Eigen::Matrix3d::Identity();
-  Ki_target_.bottomRightCorner(3, 3)
-      << config.rotational_Ki * Eigen::Matrix3d::Identity();
+  // The previous sample-count integral reset on every pose and had no dt.
+  // Keep legacy knobs explicitly zero; bounded tracking correction replaces it.
+  if (config.translational_Ki!=0 || config.rotational_Ki!=0)
+    ROS_WARN("Legacy Ki disabled; use tracking_correction/set_enabled");
+  config.translational_Ki=0; config.rotational_Ki=0;
 }
 
 void CartesianImpedanceController::equilibriumPoseCallback(
     const geometry_msgs::PoseStampedConstPtr& msg) {
-  // [DISABLED] equilibrium 수신 로그 (200Hz 명령 시 터미널 과부하 방지를 위해 주석 처리)
-  // ROS_INFO_STREAM("equilibriumPoseCallback RECEIVED message! Target Z=" << msg->pose.position.z);
-  position_d_target_ << msg->pose.position.x, msg->pose.position.y, msg->pose.position.z;
-  error_i.setZero();  // 새 목표 수신 시 적분 오차 초기화 (Ki=0 운용 시 안전, 복원됨)
-  Eigen::Quaterniond last_orientation_d_target(orientation_d_target_);
-  orientation_d_target_.coeffs() << msg->pose.orientation.x, msg->pose.orientation.y,
+  DesiredPose target;
+  target.position << msg->pose.position.x, msg->pose.position.y, msg->pose.position.z;
+  target.orientation.coeffs() << msg->pose.orientation.x, msg->pose.orientation.y,
       msg->pose.orientation.z, msg->pose.orientation.w;
-  if (last_orientation_d_target.coeffs().dot(orientation_d_target_.coeffs()) < 0.0) {
-    orientation_d_target_.coeffs() << -orientation_d_target_.coeffs();
-  }
+  if (!target.position.allFinite() || !target.orientation.coeffs().allFinite() ||
+      target.orientation.norm()<1e-6) { ROS_WARN_THROTTLE(1.0, "Rejected invalid equilibrium pose"); return; }
+  target.orientation.normalize();
+  desired_pose_buffer_.writeFromNonRT(target);
+}
+
+bool CartesianImpedanceController::setTrackingCorrection(
+    std_srvs::SetBool::Request& req, std_srvs::SetBool::Response& res) {
+  correction_control_buffer_.writeFromNonRT({static_cast<bool>(req.data), ++correction_generation_});
+  correction_node_.setParam("enabled", req.data);
+  res.success=true;
+  res.message=req.data ? "Continuous bounded correction enabled; monitor state topic" : "Correction disabling with bounded force ramp-down";
+  return true;
 }
 
 }  // namespace serl_franka_controllers

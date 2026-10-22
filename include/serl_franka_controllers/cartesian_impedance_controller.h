@@ -3,6 +3,12 @@
 #pragma once
 
 #include <memory>
+#include <atomic>
+#include <cstdint>
+#include <std_srvs/SetBool.h>
+#include <std_msgs/Float64MultiArray.h>
+#include <realtime_tools/realtime_buffer.h>
+#include <serl_franka_controllers/bounded_tracking_correction.h>
 #include <string>
 #include <vector>
 #include <fstream>
@@ -54,8 +60,7 @@ class CartesianImpedanceController : public controller_interface::MultiInterface
   Eigen::Matrix<double, 6, 6> cartesian_stiffness_target_;
   Eigen::Matrix<double, 6, 6> cartesian_damping_;
   Eigen::Matrix<double, 6, 6> cartesian_damping_target_;
-  Eigen::Matrix<double, 6, 6> Ki_;
-  Eigen::Matrix<double, 6, 6> Ki_target_;
+
 
   // Created from the input parameters
   Eigen::Matrix<double, 3, 1> translational_clip_min_;
@@ -65,10 +70,24 @@ class CartesianImpedanceController : public controller_interface::MultiInterface
   Eigen::Matrix<double, 7, 1> q_d_nullspace_;
   Eigen::Vector3d position_d_;
   Eigen::Matrix<double, 6, 1> error_;
-  Eigen::Matrix<double, 6, 1> error_i;
+
   Eigen::Quaterniond orientation_d_;
   Eigen::Vector3d position_d_target_;
   Eigen::Quaterniond orientation_d_target_;
+
+  struct DesiredPose { Eigen::Vector3d position; Eigen::Quaterniond orientation; };
+  struct CorrectionControl { bool enabled; std::uint64_t generation; };
+  realtime_tools::RealtimeBuffer<DesiredPose> desired_pose_buffer_;
+  realtime_tools::RealtimeBuffer<CorrectionControl> correction_control_buffer_;
+  BoundedTrackingCorrection tracking_correction_;
+  std::atomic<std::uint64_t> correction_generation_{0};
+  std::uint64_t applied_correction_generation_{0};
+  bool correction_enabled_{false};
+  ros::ServiceServer correction_service_;
+  ros::NodeHandle correction_node_;
+  realtime_tools::RealtimePublisher<std_msgs::Float64MultiArray> correction_publisher_;
+  ros::Time last_correction_publish_;
+  bool setTrackingCorrection(std_srvs::SetBool::Request&, std_srvs::SetBool::Response&);
 
   // Dynamic reconfigure
   std::unique_ptr<dynamic_reconfigure::Server<serl_franka_controllers::compliance_paramConfig>>

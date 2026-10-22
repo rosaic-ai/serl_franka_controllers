@@ -10,5 +10,7 @@
 
   <rosparam command="load" file="$(find serl_franka_controllers)/config/serl_franka_controllers.yaml" />
 
+  <rosparam command="load" file="$(find serl_franka_controllers)/config/tracking_correction.yaml" />
+
   <node name="controller_spawner" pkg="controller_manager" type="spawner" respawn="true" output="screen" args="cartesian_impedance_controller"/>
 </launch>

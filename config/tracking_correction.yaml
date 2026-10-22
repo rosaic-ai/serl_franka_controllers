@@ -1,0 +1,9 @@
+# Additional force limits; these are not total contact-force safety limits.
+cartesian_impedance_controller:
+  tracking_correction:
+    enabled: true
+    gain: 600.0
+    max_force: 15.0
+    slew: 3.0
+    max_error: 0.015
+    external_force_trip: 12.0

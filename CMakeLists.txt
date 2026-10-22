@@ -20,6 +20,8 @@ find_package(catkin REQUIRED COMPONENTS
   realtime_tools
   roscpp
   rospy
+  std_msgs
+  std_srvs
 )
 
 find_package(Eigen3 REQUIRED)
@@ -49,6 +51,8 @@ catkin_package(
     pluginlib
     realtime_tools
     roscpp
+    std_msgs
+    std_srvs
   DEPENDS Franka
 )
 
@@ -113,4 +117,11 @@ if(CLANG_TOOLS)
     FILES ${SOURCES}
     DEPENDS serl_franka_controllers
   )
+endif()
+
+if(CATKIN_ENABLE_TESTING)
+  add_executable(test_bounded_tracking_correction test/test_bounded_tracking_correction.cpp)
+  target_include_directories(test_bounded_tracking_correction PRIVATE include ${EIGEN3_INCLUDE_DIRS})
+  target_compile_options(test_bounded_tracking_correction PRIVATE -UNDEBUG)
+  add_test(NAME bounded_tracking_correction COMMAND test_bounded_tracking_correction)
 endif()
